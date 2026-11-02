@@ -32,8 +32,65 @@ class IssueApiWritePlugin extends GenericPlugin {
 			// Every journal created from now on starts with this plugin (and DOI)
 			// enabled. See enableForNewContext().
 			HookRegistry::register('Context::add', array($this, 'enableForNewContext'));
+			// Issue galleys hosted at a separate website: the URL is stored as the
+			// `remoteUrl` galley setting and downloads redirect to it.
+			HookRegistry::register('issuegalleydao::getAdditionalFieldNames', array($this, 'addIssueGalleyFields'));
+			HookRegistry::register('IssueHandler::download', array($this, 'redirectRemoteIssueGalley'));
+			HookRegistry::register('IssueGalleyDAO::deleteById', array($this, 'skipRemoteIssueGalleyFile'));
 		}
 		return $success;
+	}
+
+	/**
+	 * Hook callback for 'issuegalleydao::getAdditionalFieldNames'.
+	 *
+	 * $args = array($dao, &$fieldNames)
+	 *
+	 * @return boolean false, to let other hooks run
+	 */
+	public function addIssueGalleyFields($hookName, $args) {
+		$args[1][] = 'remoteUrl';
+		return false;
+	}
+
+	/**
+	 * Hook callback for 'IssueHandler::download'.
+	 *
+	 * $args = array(&$issue, &$galley)
+	 *
+	 * @return boolean true when the reader was redirected to the remote URL
+	 */
+	public function redirectRemoteIssueGalley($hookName, $args) {
+		$galley = $args[1];
+		$remoteUrl = $galley ? $galley->getData('remoteUrl') : '';
+		if (!$remoteUrl) {
+			return false;
+		}
+		Application::get()->getRequest()->redirectUrl($remoteUrl);
+		return true;
+	}
+
+	/**
+	 * Hook callback for 'IssueGalleyDAO::deleteById'.
+	 *
+	 * $args = array(&$galleyId, &$issueId)
+	 *
+	 * A remote galley has no stored file: clearing the issue id makes the DAO
+	 * delete only the galley rows instead of looking up a file that is not there.
+	 *
+	 * @return boolean false, to let other hooks run
+	 */
+	public function skipRemoteIssueGalleyFile($hookName, $args) {
+		$galleyId =& $args[0];
+		$issueId =& $args[1];
+		if (!isset($issueId)) {
+			return false;
+		}
+		$galley = DAORegistry::getDAO('IssueGalleyDAO')->getById((int) $galleyId);
+		if ($galley && !$galley->getFileId()) {
+			$issueId = null;
+		}
+		return false;
 	}
 
 	/**

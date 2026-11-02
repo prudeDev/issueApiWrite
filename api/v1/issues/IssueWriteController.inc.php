@@ -267,15 +267,23 @@ class IssueWriteController {
 
 		$params = (array) $slimRequest->getParsedBody();
 
-		// The uploaded file must exist and belong to the requesting user.
-		$temporaryFileId = isset($params['temporaryFileId']) ? (int) $params['temporaryFileId'] : 0;
-		if (!$temporaryFileId) {
-			return $response->withStatus(400)->withJson(array('temporaryFileId' => array(__('form.fileRequired'))));
-		}
-		$temporaryFileDao = DAORegistry::getDAO('TemporaryFileDAO'); /* @var $temporaryFileDao TemporaryFileDAO */
-		$temporaryFile = $temporaryFileDao->getTemporaryFile($temporaryFileId, $user->getId());
-		if (!$temporaryFile) {
-			return $response->withStatus(400)->withJson(array('temporaryFileId' => array(__('common.uploadFailed'))));
+		// Either a remote URL or an uploaded file that belongs to the requesting user.
+		$remoteUrl = isset($params['remoteUrl']) ? trim((string) $params['remoteUrl']) : '';
+		$temporaryFile = null;
+		if ($remoteUrl !== '') {
+			if (!$this->isValidRemoteUrl($remoteUrl)) {
+				return $response->withStatus(400)->withJson(array('remoteUrl' => array(__('validator.url'))));
+			}
+		} else {
+			$temporaryFileId = isset($params['temporaryFileId']) ? (int) $params['temporaryFileId'] : 0;
+			if (!$temporaryFileId) {
+				return $response->withStatus(400)->withJson(array('temporaryFileId' => array(__('form.fileRequired'))));
+			}
+			$temporaryFileDao = DAORegistry::getDAO('TemporaryFileDAO'); /* @var $temporaryFileDao TemporaryFileDAO */
+			$temporaryFile = $temporaryFileDao->getTemporaryFile($temporaryFileId, $user->getId());
+			if (!$temporaryFile) {
+				return $response->withStatus(400)->withJson(array('temporaryFileId' => array(__('common.uploadFailed'))));
+			}
 		}
 
 		// Galley locale must be a supported form locale of the journal.
@@ -284,15 +292,19 @@ class IssueWriteController {
 			return $response->withStatus(400)->withJson(array('galleyLocale' => array(__('editor.issues.galleyLocaleRequired'))));
 		}
 
-		// Move the temporary upload into the issue's file storage.
-		import('classes.file.IssueFileManager');
-		$issueFileManager = new IssueFileManager($issue->getId());
-		$issueFile = $issueFileManager->fromTemporaryFile($temporaryFile);
-
 		$galleyDao = DAORegistry::getDAO('IssueGalleyDAO'); /* @var $galleyDao IssueGalleyDAO */
 		$galley = $galleyDao->newDataObject();
 		$galley->setIssueId($issue->getId());
-		$galley->setFileId($issueFile->getId());
+		if ($temporaryFile) {
+			// Move the temporary upload into the issue's file storage.
+			import('classes.file.IssueFileManager');
+			$issueFileManager = new IssueFileManager($issue->getId());
+			$issueFile = $issueFileManager->fromTemporaryFile($temporaryFile);
+			$galley->setFileId($issueFile->getId());
+		} else {
+			$galley->setFileId(0);
+			$galley->setData('remoteUrl', $remoteUrl);
+		}
 		$galley->setLocale($galleyLocale);
 		$galley->setLabel(!empty($params['label']) ? $params['label'] : 'PDF');
 		if (!empty($params['urlPath'])) {
@@ -329,8 +341,23 @@ class IssueWriteController {
 
 		$params = (array) $slimRequest->getParsedBody();
 
+		// Point the galley to a remote URL; the previous file, if any, is deleted.
+		$remoteUrl = isset($params['remoteUrl']) ? trim((string) $params['remoteUrl']) : '';
+		if ($remoteUrl !== '') {
+			if (!$this->isValidRemoteUrl($remoteUrl)) {
+				return $response->withStatus(400)->withJson(array('remoteUrl' => array(__('validator.url'))));
+			}
+			if ($galley->getFileId()) {
+				import('classes.file.IssueFileManager');
+				$issueFileManager = new IssueFileManager($issue->getId());
+				$issueFileManager->deleteById($galley->getFileId());
+			}
+			$galley->setFileId(0);
+			$galley->setData('remoteUrl', $remoteUrl);
+		}
+
 		// Replace the file if a new upload was provided.
-		if (!empty($params['temporaryFileId'])) {
+		if ($remoteUrl === '' && !empty($params['temporaryFileId'])) {
 			$temporaryFileDao = DAORegistry::getDAO('TemporaryFileDAO'); /* @var $temporaryFileDao TemporaryFileDAO */
 			$temporaryFile = $temporaryFileDao->getTemporaryFile((int) $params['temporaryFileId'], $user->getId());
 			if (!$temporaryFile) {
@@ -344,6 +371,7 @@ class IssueWriteController {
 			}
 			$issueFile = $issueFileManager->fromTemporaryFile($temporaryFile);
 			$galley->setFileId($issueFile->getId());
+			$galley->setData('remoteUrl', '');
 		}
 
 		if (array_key_exists('label', $params)) {
@@ -406,11 +434,19 @@ class IssueWriteController {
 			'locale' => $galley->getLocale(),
 			'seq' => $galley->getSequence(),
 			'urlPath' => $galley->getData('urlPath'),
+			'remoteUrl' => $galley->getData('remoteUrl') ?: '',
 			'urlPublished' => $dispatcher->url(
 				$request, ROUTE_PAGE, null, 'issue', 'download',
 				array($issue->getId(), $galley->getId())
 			),
 		);
+	}
+
+	/**
+	 * Only absolute http(s) URLs are accepted for remotely-hosted galleys.
+	 */
+	protected function isValidRemoteUrl($url) {
+		return (bool) filter_var($url, FILTER_VALIDATE_URL) && preg_match('#^https?://#i', $url);
 	}
 
 	/**
