@@ -31,6 +31,7 @@ class ArticleWriteController {
 	 *   locale          string   (optional; defaults to the journal primary locale)
 	 *   authorName      string   (optional; creates a single author)
 	 *   temporaryFileId int      (optional; the PDF, uploaded first to /temporaryFiles)
+	 *   remoteUrl       string   (optional; galley hosted on a separate website instead of a PDF)
 	 *   galleyLabel     string   (optional; defaults to "PDF")
 	 */
 	public function add($slimRequest, $response, $args) {
@@ -68,7 +69,12 @@ class ArticleWriteController {
 		// file id discovered at that point would leave the submission and
 		// publication already committed with no way to roll them back.
 		$temporaryFile = null;
-		if (!empty($params['temporaryFileId'])) {
+		$remoteUrl = isset($params['remoteUrl']) ? trim((string) $params['remoteUrl']) : '';
+		if ($remoteUrl !== '') {
+			if (!$this->isValidRemoteUrl($remoteUrl)) {
+				return $response->withStatus(400)->withJson(array('remoteUrl' => array(__('validator.url'))));
+			}
+		} elseif (!empty($params['temporaryFileId'])) {
 			$temporaryFileDao = DAORegistry::getDAO('TemporaryFileDAO'); /* @var $temporaryFileDao TemporaryFileDAO */
 			$temporaryFile = $temporaryFileDao->getTemporaryFile((int) $params['temporaryFileId'], $user->getId());
 			if (!$temporaryFile) {
@@ -139,7 +145,13 @@ class ArticleWriteController {
 
 		// --- 4. Galley + PDF ---
 		$galley = null;
-		if ($temporaryFile) {
+		if ($remoteUrl !== '') {
+			$galley = $this->attachRemoteGalley(
+				$publication, $remoteUrl,
+				!empty($params['galleyLabel']) ? $params['galleyLabel'] : 'PDF',
+				$locale
+			);
+		} elseif ($temporaryFile) {
 			$galley = $this->attachGalley(
 				$submission, $publication, $context, $user, $temporaryFile,
 				!empty($params['galleyLabel']) ? $params['galleyLabel'] : 'PDF',
@@ -240,6 +252,30 @@ class ArticleWriteController {
 		Services::get('submissionFile')->add($submissionFile, Application::get()->getRequest());
 
 		return $galleyDao->getById($galleyId, $publication->getId());
+	}
+
+	/**
+	 * Create an ArticleGalley hosted on a separate website (no submission file),
+	 * the same as OJS does for "This galley will be available at a separate website".
+	 *
+	 * @return ArticleGalley
+	 */
+	protected function attachRemoteGalley($publication, $remoteUrl, $label, $locale) {
+		$galleyDao = DAORegistry::getDAO('ArticleGalleyDAO'); /* @var $galleyDao ArticleGalleyDAO */
+		$galley = $galleyDao->newDataObject();
+		$galley->setData('publicationId', $publication->getId());
+		$galley->setLabel($label);
+		$galley->setLocale($locale);
+		$galley->setData('urlRemote', $remoteUrl);
+		$galleyId = $galleyDao->insertObject($galley);
+		return $galleyDao->getById($galleyId, $publication->getId());
+	}
+
+	/**
+	 * Only absolute http(s) URLs are accepted as remote galleys.
+	 */
+	protected function isValidRemoteUrl($url) {
+		return (bool) filter_var($url, FILTER_VALIDATE_URL) && preg_match('#^https?://#i', $url);
 	}
 
 	/**

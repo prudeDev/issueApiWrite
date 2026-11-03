@@ -44,7 +44,7 @@ class ArticleGalleyController {
 	/**
 	 * POST /submissions/{submissionId}/publications/{publicationId}/galleys
 	 *
-	 * Body: temporaryFileId (required, the PDF), label, galleyLocale.
+	 * Body: temporaryFileId (the PDF) or remoteUrl (separate website), label, galleyLocale.
 	 */
 	public function addArticleGalley($slimRequest, $response, $args) {
 		$request = Application::get()->getRequest();
@@ -57,9 +57,17 @@ class ArticleGalleyController {
 		}
 
 		$params = (array) $slimRequest->getParsedBody();
-		$temporaryFile = $this->getUploadedFile($params, $user);
-		if (!$temporaryFile) {
-			return $response->withStatus(400)->withJson(array('temporaryFileId' => array(__('form.fileRequired'))));
+		$remoteUrl = isset($params['remoteUrl']) ? trim((string) $params['remoteUrl']) : '';
+		$temporaryFile = null;
+		if ($remoteUrl !== '') {
+			if (!$this->isValidRemoteUrl($remoteUrl)) {
+				return $response->withStatus(400)->withJson(array('remoteUrl' => array(__('validator.url'))));
+			}
+		} else {
+			$temporaryFile = $this->getUploadedFile($params, $user);
+			if (!$temporaryFile) {
+				return $response->withStatus(400)->withJson(array('temporaryFileId' => array(__('form.fileRequired'))));
+			}
 		}
 
 		if (DoiHelper::requested($params)) {
@@ -77,9 +85,12 @@ class ArticleGalleyController {
 		$galley->setData('publicationId', $publication->getId());
 		$galley->setLabel(!empty($params['label']) ? $params['label'] : 'PDF');
 		$galley->setLocale($locale);
+		if ($remoteUrl !== '') $galley->setData('urlRemote', $remoteUrl);
 		$galleyId = $galleyDao->insertObject($galley);
 
-		$this->storeFile($temporaryFile, $submission, $galleyId, $locale, $context, $user);
+		if ($temporaryFile) {
+			$this->storeFile($temporaryFile, $submission, $galleyId, $locale, $context, $user);
+		}
 
 		if (DoiHelper::requested($params)) {
 			DoiHelper::store($galleyDao, $galleyId, $params['doi']);
@@ -91,7 +102,8 @@ class ArticleGalleyController {
 	/**
 	 * PUT /submissions/{submissionId}/publications/{publicationId}/galleys/{galleyId}
 	 *
-	 * Send temporaryFileId to replace the PDF (old file removed); send label to
+	 * Send temporaryFileId to replace the PDF (old file removed) or remoteUrl to
+	 * point the galley to a separate website (old file removed); send label to
 	 * rename. Omitted fields are unchanged.
 	 */
 	public function editArticleGalley($slimRequest, $response, $args) {
@@ -118,7 +130,21 @@ class ArticleGalleyController {
 			}
 		}
 
-		if (!empty($params['temporaryFileId'])) {
+		$remoteUrl = isset($params['remoteUrl']) ? trim((string) $params['remoteUrl']) : '';
+		if ($remoteUrl !== '') {
+			if (!$this->isValidRemoteUrl($remoteUrl)) {
+				return $response->withStatus(400)->withJson(array('remoteUrl' => array(__('validator.url'))));
+			}
+			$oldFileId = $galley->getFileId();
+			$galley->setData('urlRemote', $remoteUrl);
+			$galley->_data['submissionFileId'] = null; // Work around pkp/pkp-lib#5740
+			$galleyDao->updateObject($galley);
+			if ($oldFileId) {
+				$oldFile = Services::get('submissionFile')->get($oldFileId);
+				if ($oldFile) Services::get('submissionFile')->delete($oldFile);
+			}
+			$galley = $galleyDao->getById($galley->getId(), $publication->getId());
+		} elseif (!empty($params['temporaryFileId'])) {
 			$temporaryFile = $this->getUploadedFile($params, $user);
 			if (!$temporaryFile) {
 				return $response->withStatus(400)->withJson(array('temporaryFileId' => array(__('common.uploadFailed'))));
@@ -133,6 +159,12 @@ class ArticleGalleyController {
 				if ($oldFile) Services::get('submissionFile')->delete($oldFile);
 			}
 			$galley = $galleyDao->getById($galley->getId(), $publication->getId());
+			// A file replaces any previous remote URL.
+			if ($galley->getData('urlRemote')) {
+				$galley->_data['urlRemote'] = null; // Work around pkp/pkp-lib#5740
+				$galleyDao->updateObject($galley);
+				$galley = $galleyDao->getById($galley->getId(), $publication->getId());
+			}
 		}
 
 		if (array_key_exists('label', $params)) {
@@ -208,6 +240,13 @@ class ArticleGalleyController {
 		Services::get('submissionFile')->add($submissionFile, Application::get()->getRequest());
 	}
 
+	/**
+	 * Only absolute http(s) URLs are accepted as remote galleys.
+	 */
+	protected function isValidRemoteUrl($url) {
+		return (bool) filter_var($url, FILTER_VALIDATE_URL) && preg_match('#^https?://#i', $url);
+	}
+
 	protected function getUploadedFile($params, $user) {
 		if (empty($params['temporaryFileId'])) {
 			return null;
@@ -259,6 +298,7 @@ class ArticleGalleyController {
 			'locale' => $galley->getLocale(),
 			'seq' => $galley->getSequence(),
 			'urlPath' => $galley->getData('urlPath'),
+			'remoteUrl' => $galley->getData('urlRemote') ?: null,
 			'doi' => DoiHelper::get($galley),
 		);
 	}
